@@ -1,0 +1,5 @@
+streamlit>=1.39
+python-dotenv>=1.0.1
+google-generativeai>=0.7.2
+pymupdf>=1.24
+python-docx>=1.1.2
