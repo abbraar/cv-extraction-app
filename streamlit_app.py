@@ -41,6 +41,16 @@ if gem_key:
 
 api_key_present = bool(gem_key)
 
+# --- DEBUG (remove later) ---
+try:
+    _sk = list(st.secrets.keys())
+except Exception:
+    _sk = []
+_env_gem = bool(os.getenv("GEMINI_API_KEY"))
+_env_goo = bool(os.getenv("GOOGLE_API_KEY"))
+st.caption(f"DEBUG → secrets.keys()={_sk}  |  env.GEMINI_API_KEY={_env_gem}  |  env.GOOGLE_API_KEY={_env_goo}")
+# --- END DEBUG ---
+
 # ----------------------------
 # UI
 # ----------------------------
