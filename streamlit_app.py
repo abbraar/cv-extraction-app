@@ -11,24 +11,30 @@ from cv_extractor import (
     extract_with_gemini,
     normalize_parsed,
     write_ats_docx,
-    heuristic_projects_from_text,  # fallback to mine projects if empty
+    heuristic_projects_from_text,  # fallback if projects empty
 )
 
 # ----------------------------
 # Environment / API key setup
 # ----------------------------
-# Load local .env (for development)
+# Load .env for local dev
 load_dotenv()
 
-# Prefer Streamlit Secrets on cloud; fallback to .env locally
-gem_key = (
-    st.secrets.get("GEMINI_API_KEY")
-    or st.secrets.get("GOOGLE_API_KEY")
-    or os.getenv("GEMINI_API_KEY")
-    or os.getenv("GOOGLE_API_KEY")
-)
+# Try Streamlit Secrets (cloud) but DO NOT crash if secrets.toml doesn't exist
+gem_key_from_secrets = None
+try:
+    # If secrets.toml exists, these will work; otherwise this block will raise and we ignore it
+    gem_key_from_secrets = (
+        st.secrets.get("GEMINI_API_KEY")  # type: ignore[attr-defined]
+        or st.secrets.get("GOOGLE_API_KEY")  # type: ignore[attr-defined]
+    )
+except Exception:
+    gem_key_from_secrets = None
 
-# Make the key available for any SDK that expects either name
+# Fallback to environment variables (from .env or hosting env)
+gem_key = gem_key_from_secrets or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+# Make the key available under BOTH names for any SDKs
 if gem_key:
     os.environ["GEMINI_API_KEY"] = gem_key
     os.environ["GOOGLE_API_KEY"] = gem_key
@@ -45,7 +51,10 @@ st.caption("Upload a PDF or DOCX CV. We’ll extract clean fields and generate a
 with st.expander("Environment status", expanded=not api_key_present):
     st.write("**GEMINI_API_KEY**:", "✅ Found" if api_key_present else "❌ Missing")
     if not api_key_present:
-        st.info("Add `GEMINI_API_KEY=...` to your `.env` (local) **or** set it in Streamlit **Secrets** (cloud).")
+        st.info(
+            "Add `GEMINI_API_KEY=...` to your local `.env`, "
+            "or set it in Streamlit Cloud **Secrets**."
+        )
 
 uploaded = st.file_uploader("Upload CV (.pdf or .docx)", type=["pdf", "docx"])
 
@@ -64,22 +73,22 @@ if uploaded:
         cv_path = tmp_in.name
 
     try:
-        # 1) Extract plain text from the CV
+        # 1) Extract plain text
         text = read_cv_text(cv_path)
 
-        # 2) Call Gemini to parse structured fields
+        # 2) Parse with Gemini
         data = extract_with_gemini(text)
 
-        # 3) Normalize schema / shapes
+        # 3) Normalize output schema
         data = normalize_parsed(data)
 
-        # 4) Fallback: mine Projects from text if the model returned none
+        # 4) Fallback: mine Projects if empty
         if not data.get("projects"):
             mined = heuristic_projects_from_text(text, max_items=5)
             if mined:
                 data["projects"] = mined
 
-        # 5) Build downloads (JSON + ATS .docx)
+        # 5) Build downloads
         json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_out:
