@@ -21,6 +21,8 @@ from typing import Dict, Any, List
 import fitz  # PyMuPDF for PDF text
 from docx import Document
 from docx.shared import Pt
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 import google.generativeai as genai
 from dotenv import load_dotenv
 
@@ -512,11 +514,42 @@ def extract_with_gemini(cv_text: str) -> Dict[str, Any]:
 
 
 # --------------- WORD OUTPUT --------------
+def _remove_table_borders(table):
+    """
+    Robustly remove all borders from a python-docx table by editing the XML.
+    Avoids direct attribute access that may not exist across versions.
+    """
+    tbl = table._tbl  # CT_Tbl (lxml element)
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement('w:tblPr')
+        tbl.append(tblPr)
+
+    # find or create <w:tblBorders>
+    tblBorders = tblPr.find(qn('w:tblBorders'))
+    if tblBorders is None:
+        tblBorders = OxmlElement('w:tblBorders')
+        tblPr.append(tblBorders)
+
+    # for each border edge ensure w:val="nil"
+    for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
+        tag_qn = qn(f'w:{edge}')
+        el = tblBorders.find(tag_qn)
+        if el is None:
+            el = OxmlElement(f'w:{edge}')
+            tblBorders.append(el)
+        el.set(qn('w:val'), 'nil')
+
+
 def write_ats_docx(parsed: Dict[str, Any], out_path: str):
     doc = Document()
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
+
+    def space(lines=1):
+        for _ in range(lines):
+            doc.add_paragraph()
 
     def heading(text):
         p = doc.add_paragraph()
@@ -524,7 +557,7 @@ def write_ats_docx(parsed: Dict[str, Any], out_path: str):
         r.bold = True
         r.font.size = Pt(14)
 
-    # Header
+    # ===== Header =====
     name = parsed.get("full_name") or ""
     title = parsed.get("current_title") or ""
     head = doc.add_paragraph()
@@ -533,100 +566,120 @@ def write_ats_docx(parsed: Dict[str, Any], out_path: str):
     r1.font.size = Pt(16)
     if title:
         head.add_run(" — " + title)
-    doc.add_paragraph()
+    space(1)
 
-    # Total years
+    # ===== Total years =====
     if parsed.get("total_experience_years") is not None:
         doc.add_paragraph(f"Total Experience: {parsed['total_experience_years']} years")
 
-    # Areas of Expertise
-    if parsed["areas_of_expertise"]:
+    # ===== Professional Experience (moved to the top) =====
+    if parsed.get("professional_experience"):
+        space(1)
+        heading("Professional Experience")
+        for exp in parsed["professional_experience"]:
+            if isinstance(exp, dict):
+                head_parts = [exp.get("title"), exp.get("company"), exp.get("dates")]
+                head_line = " | ".join([p for p in head_parts if p])
+                if head_line:
+                    doc.add_paragraph(head_line)
+                for h in exp.get("highlights", []):
+                    if h and str(h).strip():
+                        doc.add_paragraph(str(h).strip(), style="List Bullet")
+            else:
+                line = str(exp).strip()
+                if line:
+                    doc.add_paragraph(line)
+
+    # ===== Areas of Expertise (borderless 2-column table) =====
+    areas = parsed.get("areas_of_expertise") or []
+    if areas:
+        space(1)
         heading("Areas of Expertise")
-        for item in parsed["areas_of_expertise"]:
-            doc.add_paragraph(str(item), style="List Bullet")
 
-    # Industry Expertise
-    if parsed["industry_expertise"]:
+        mid = (len(areas) + 1) // 2
+        left_items, right_items = areas[:mid], areas[mid:]
+
+        table = doc.add_table(rows=1, cols=2)
+        _remove_table_borders(table)  # remove borders reliably
+
+        # Left column
+        left_cell = table.rows[0].cells[0]
+        for item in left_items:
+            p = left_cell.add_paragraph(style="List Bullet")
+            p.paragraph_format.space_after = Pt(0)
+            p.add_run(str(item))
+
+        # Right column
+        right_cell = table.rows[0].cells[1]
+        for item in right_items:
+            p = right_cell.add_paragraph(style="List Bullet")
+            p.paragraph_format.space_after = Pt(0)
+            p.add_run(str(item))
+
+    # ===== Industry Expertise =====
+    industries = parsed.get("industry_expertise") or []
+    if industries:
+        space(1)
         heading("Industry Expertise")
-        for item in parsed["industry_expertise"]:
-            doc.add_paragraph(str(item), style="List Bullet")
+        for item in industries:
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(str(item))
 
-    # Education
-    if parsed["education"]:
+    # ===== Education =====
+    education = parsed.get("education") or []
+    if education:
+        space(1)
         heading("Education")
-        for ed in parsed["education"]:
+        for ed in education:
             if isinstance(ed, dict):
                 parts = [ed.get("degree"), ed.get("institution"), ed.get("year")]
                 parts = [p for p in parts if p]
                 line = " | ".join(parts)
             else:
                 line = str(ed).strip()
-
             if line:
                 doc.add_paragraph(line)
 
-    # Professional Memberships
-    if parsed["professional_memberships"]:
+    # ===== Professional Memberships =====
+    memberships = parsed.get("professional_memberships") or []
+    if memberships:
+        space(1)
         heading("Professional Memberships")
-        for m in parsed["professional_memberships"]:
-            doc.add_paragraph(m, style="List Bullet")
+        for m in memberships:
+            doc.add_paragraph(str(m), style="List Bullet")
 
-    # Trainings & Certifications (handles dicts and strings)
-    if parsed["trainings_and_certifications"]:
+    # ===== Trainings & Certifications =====
+    certs = parsed.get("trainings_and_certifications") or []
+    if certs:
+        space(1)
         heading("Trainings & Certifications")
-        for c in parsed["trainings_and_certifications"]:
+        for c in certs:
             if isinstance(c, dict):
                 parts = []
                 if c.get("name"):
                     parts.append(c["name"])
                 if c.get("issuer"):
                     parts.append(c["issuer"])
-
                 line = " — ".join(parts) if parts else ""
-
                 if c.get("duration"):
                     line = (line + f" ({c['duration']})").strip()
-
                 if line:
                     doc.add_paragraph(line, style="List Bullet")
             else:
                 doc.add_paragraph(str(c), style="List Bullet")
 
-    # Professional Experience
-    if parsed["professional_experience"]:
-        heading("Professional Experience")
-        for exp in parsed["professional_experience"]:
-            if isinstance(exp, dict):
-                head_parts = [exp.get("title"), exp.get("company"), exp.get("dates")]
-                head_parts = [p for p in head_parts if p]
-                head_line = " | ".join(head_parts)
-
-                if head_line:
-                    doc.add_paragraph(head_line)
-
-                for h in exp.get("highlights", []):
-                    doc.add_paragraph(h, style="List Bullet")
-            else:
-                # string fallback
-                line = str(exp).strip()
-                if line:
-                    doc.add_paragraph(line)
-
-    # Projects
-    if parsed["projects"]:
+    # ===== Projects =====
+    projects = parsed.get("projects") or []
+    if projects:
+        space(1)
         heading("Projects")
-        for pr in parsed["projects"]:
+        for pr in projects:
             if isinstance(pr, dict):
-                line_parts = [pr.get("name"), pr.get("role")]
-                line_parts = [p for p in line_parts if p]
-                line = " | ".join(line_parts)
-
-                if line:
-                    doc.add_paragraph(line)
-
+                header = " | ".join([p for p in [pr.get("name"), pr.get("role")] if p])
+                if header:
+                    doc.add_paragraph(header)
                 if pr.get("summary"):
                     doc.add_paragraph(pr["summary"])
-
                 if pr.get("tech"):
                     doc.add_paragraph("Technologies: " + ", ".join(pr["tech"]))
             else:
